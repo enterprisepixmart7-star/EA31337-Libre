@@ -1,0 +1,192 @@
+//+------------------------------------------------------------------+
+//|                                                   ORBot.mq5      |
+//|      Opening Range Breakout EA (London & New York Sessions)      |
+//+------------------------------------------------------------------+
+#property strict
+
+//--- Inputs
+input string   InpSymbol       = "EURUSD";     // Trading symbol
+input double   InpLotSize      = 0.10;         // Lot size
+input double   InpRiskReward   = 1.2;          // Risk-to-Reward ratio
+input int      InpSlippage     = 10;           // Slippage (points)
+
+//--- Session times (server time)
+input int LondonHour   = 10;    // London open hour
+input int LondonMinute = 0;     // London open minute
+input int NYHour       = 16;    // New York open hour
+input int NYMinute     = 30;    // New York open minute
+
+//--- Track last trade per day
+datetime lastTradeTimeLondon = 0;
+datetime lastTradeTimeNY     = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   Print("✅ ORBot initialized for ", InpSymbol);
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   Print("🛑 ORBot stopped");
+}
+
+//+------------------------------------------------------------------+
+//| Main Tick Function                                               |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   datetime now = TimeCurrent();
+   MqlDateTime tm;
+   TimeToStruct(now, tm);
+
+   //--- Check London Session
+   if(tm.hour == LondonHour && tm.min == LondonMinute)
+   {
+      if(lastTradeTimeLondon < DateOfDay(now))
+      {
+         RunSession("London");
+         lastTradeTimeLondon = DateOfDay(now);
+      }
+   }
+
+   //--- Check New York Session
+   if(tm.hour == NYHour && tm.min == NYMinute)
+   {
+      if(lastTradeTimeNY < DateOfDay(now))
+      {
+         RunSession("New York");
+         lastTradeTimeNY = DateOfDay(now);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Run ORB Session                                                  |
+//+------------------------------------------------------------------+
+void RunSession(string sessionName)
+{
+   Print("⚡ Running ", sessionName, " Session Strategy");
+
+   //--- Wait 15 minutes for ORB formation
+   Sleep(1000 * 60 * 15);
+
+   //--- Get ORB (first 15m candle after session open)
+   MqlRates rates[];
+   if(CopyRates(InpSymbol, PERIOD_M15, 0, 5, rates) < 2)
+   {
+      Print("❌ Failed to fetch 15m candles");
+      return;
+   }
+
+   double orbHigh = rates[1].high;
+   double orbLow  = rates[1].low;
+   Print("📊 ORB High: ", DoubleToString(orbHigh, _Digits),
+         " | ORB Low: ", DoubleToString(orbLow, _Digits));
+
+   bool traded = false;
+
+   while(!traded)
+   {
+      MqlRates m5[];
+      if(CopyRates(InpSymbol, PERIOD_M5, 0, 20, m5) < 2)
+      {
+         Sleep(1000 * 60);
+         continue;
+      }
+
+      MqlRates prev = m5[1];
+      MqlRates last = m5[0];
+
+      // --- Breakout Up ---
+      if(last.close > orbHigh)
+      {
+         double entry = orbHigh;
+         double sl = orbLow;
+         double tp = entry + (entry - sl) * InpRiskReward;
+
+         if(prev.close > orbHigh && last.low <= orbHigh)
+         {
+            PlaceOrder(ORDER_TYPE_BUY, sl, tp);
+            traded = true;
+         }
+      }
+
+      // --- Breakout Down ---
+      if(last.close < orbLow)
+      {
+         double entry = orbLow;
+         double sl = orbHigh;
+         double tp = entry - (sl - entry) * InpRiskReward;
+
+         if(prev.close < orbLow && last.high >= orbLow)
+         {
+            PlaceOrder(ORDER_TYPE_SELL, sl, tp);
+            traded = true;
+         }
+      }
+
+      Sleep(1000 * 60); // check every minute
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Place Market Order                                               |
+//+------------------------------------------------------------------+
+void PlaceOrder(int orderType, double sl, double tp)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(InpSymbol, tick))
+   {
+      Print("❌ Failed to get tick data");
+      return;
+   }
+
+   double price = (orderType == ORDER_TYPE_BUY ? tick.ask : tick.bid);
+
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   ZeroMemory(request);
+   ZeroMemory(result);
+
+   request.action   = TRADE_ACTION_DEAL;
+   request.symbol   = InpSymbol;
+   request.volume   = InpLotSize;
+   request.type     = orderType;
+   request.price    = NormalizeDouble(price, _Digits);
+   request.sl       = NormalizeDouble(sl, _Digits);
+   request.tp       = NormalizeDouble(tp, _Digits);
+   request.deviation= InpSlippage;
+   request.magic    = 123456;
+   request.comment  = "ORB Strategy";
+   request.type_filling = ORDER_FILLING_IOC;
+
+   if(!OrderSend(request, result))
+   {
+      Print("❌ OrderSend failed | Retcode: ", IntegerToString(result.retcode));
+   }
+   else
+   {
+      Print("✅ Order placed! Ticket: ", IntegerToString(result.order),
+            " | SL: ", DoubleToString(request.sl, _Digits),
+            " | TP: ", DoubleToString(request.tp, _Digits));
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Utility: Get start of day                                        |
+//+------------------------------------------------------------------+
+datetime DateOfDay(datetime t)
+{
+   MqlDateTime st;
+   TimeToStruct(t, st);
+   st.hour = 0; st.min = 0; st.sec = 0;
+   return StructToTime(st);
+}
+//+------------------------------------------------------------------+
